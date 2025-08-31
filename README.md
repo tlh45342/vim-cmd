@@ -13,3 +13,12 @@ vim-vmd is mean to commmunicate with hostd
 hostd is meant to be a CPU emulator server.
 
 EVERYTHING HERE IS A WORK IN PROGRESS
+
+## INSTALLATION
+
+```bash
+cd /opt
+git clone https://github.com/tlh45342/vim-cmd.git
+cd vim-cmd
+make ; make install
+```
