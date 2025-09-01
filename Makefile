@@ -1,84 +1,65 @@
-# vim-cmd - Makefile (client-only, mac-smart per-user install; no heredocs)
-CC      ?= gcc
-CFLAGS  ?= -Wall -Wextra -O2 -g -D_XOPEN_SOURCE=700 -D_DEFAULT_SOURCE
-LDFLAGS ?=
-INC     ?=
+#!/bin/sh
+# macOS per-user installer for vim-cmd
+# Usage: install_macos.sh <DESTDIR> <BINDIR>
 
-PREFIX  ?= /usr/local
-BINDIR  ?= $(PREFIX)/bin
+set -eu
 
-.PHONY: all clean install uninstall win
+DESTDIR="${1:-}"
+BINDIR_DEFAULT="${2:-/usr/local/bin}"
 
-all: vim-cmd
+# Determine the invoking user's home even under sudo
+if [ -n "${SUDO_USER-}" ]; then
+  USER_HOME=$(eval echo "~$SUDO_USER")
+  USER_NAME="$SUDO_USER"
+else
+  USER_HOME="${HOME}"
+  USER_NAME="$(id -un)"
+fi
 
-vim-cmd: src/vim-cmd.c
-	$(CC) $(CFLAGS) $(INC) -o $@ $< $(LDFLAGS)
+# Choose target bindir:
+#  - If no overrides and default was /usr/local/bin, install to ~/bin
+#  - Otherwise honor DESTDIR/BINDIR as requested
+if [ -z "${DESTDIR}" ] && [ "${BINDIR_DEFAULT}" = "/usr/local/bin" ]; then
+  TARGET_BINDIR="${USER_HOME}/bin"
+else
+  TARGET_BINDIR="${DESTDIR}${BINDIR_DEFAULT}"
+fi
 
-clean:
-	rm -f vim-cmd vim-cmd.exe
-	rm -f *.o src/*.o
+# Create and install
+mkdir -p "${TARGET_BINDIR}"
+install -m 0755 vim-cmd "${TARGET_BINDIR}/vim-cmd"
 
-install: vim-cmd
-	@UNAME=$$(uname -s); \
-	if [ "$$UNAME" = "Darwin" ]; then \
-		# Determine the real user's home (even under sudo)
-		USER_HOME="$$HOME"; \
-		if [ -n "$$SUDO_USER" ]; then USER_HOME=$$(eval echo ~"$$SUDO_USER"); fi; \
-		# Default to per-user ~/bin if not overridden and BINDIR is /usr/local/bin
-		if [ -z "$(DESTDIR)" ] && [ "$(BINDIR)" = "/usr/local/bin" ]; then \
-			TARGET_BINDIR="$$USER_HOME/bin"; \
-		else \
-			TARGET_BINDIR="$(DESTDIR)$(BINDIR)"; \
-		fi; \
-		mkdir -p "$$TARGET_BINDIR"; \
-		install -m 0755 vim-cmd "$$TARGET_BINDIR/vim-cmd"; \
-		# Fix ownership if installed to user's home via sudo
-		if [ -n "$$SUDO_USER" ] && [ -z "$(DESTDIR)" ] && [ "$${TARGET_BINDIR#$$USER_HOME/}" != "$$TARGET_BINDIR" ]; then \
-			CHGRP=$$(id -gn "$$SUDO_USER" 2>/dev/null || echo staff); \
-			chown "$$SUDO_USER:$$CHGRP" "$$TARGET_BINDIR/vim-cmd" 2>/dev/null || true; \
-		fi; \
-		# Idempotent PATH guard in ~/.zprofile using printf (no heredoc)
-		if [ -z "$(DESTDIR)" ] && [ "$${TARGET_BINDIR#$$USER_HOME/}" != "$$TARGET_BINDIR" ]; then \
-			ZP="$$USER_HOME/.zprofile"; \
-			MARK="# Added by vim-cmd installer (PATH guard for $$TARGET_BINDIR)"; \
-			[ -f "$$ZP" ] || : > "$$ZP"; \
-			if ! grep -qF "$$MARK" "$$ZP"; then \
-				printf '\n%s\n' "$$MARK" >> "$$ZP"; \
-				printf 'case ":$$PATH:" in\n' >> "$$ZP"; \
-				printf '  *":%s:"*) ;;\n' "$$TARGET_BINDIR" >> "$$ZP"; \
-				printf '  *) PATH="%s:$$PATH" ;;\n' "$$TARGET_BINDIR" >> "$$ZP"; \
-				printf 'esac\nexport PATH\n' >> "$$ZP"; \
-				echo "Updated $$ZP (PATH guard for $$TARGET_BINDIR)"; \
-			else \
-				echo "PATH guard already present in $$ZP"; \
-			fi; \
-		fi; \
-		echo "Installed to: $$TARGET_BINDIR/vim-cmd"; \
-	else \
-		# Non-macOS: standard install
-		TARGET_BINDIR="$(DESTDIR)$(BINDIR)"; \
-		install -d "$$TARGET_BINDIR"; \
-		install -m 0755 vim-cmd "$$TARGET_BINDIR/vim-cmd"; \
-		echo "Installed to: $$TARGET_BINDIR/vim-cmd"; \
-	fi
-	@echo "Install complete."
+# If we installed into the user's home via sudo, fix ownership
+case "${TARGET_BINDIR}" in
+  "${USER_HOME}"/*)
+    if [ -n "${SUDO_USER-}" ] && [ -z "${DESTDIR}" ]; then
+      CHGRP="$(id -gn "$USER_NAME" 2>/dev/null || echo staff)"
+      chown "${USER_NAME}:${CHGRP}" "${TARGET_BINDIR}/vim-cmd" 2>/dev/null || true
+    fi
+    ;;
+esac
 
-uninstall:
-	@UNAME=$$(uname -s); \
-	if [ "$$UNAME" = "Darwin" ]; then \
-		USER_HOME="$$HOME"; \
-		if [ -n "$$SUDO_USER" ]; then USER_HOME=$$(eval echo ~"$$SUDO_USER"); fi; \
-		if [ -z "$(DESTDIR)" ] && [ "$(BINDIR)" = "/usr/local/bin" ]; then \
-			TARGET_BINDIR="$$USER_HOME/bin"; \
-		else \
-			TARGET_BINDIR="$(DESTDIR)$(BINDIR)"; \
-		fi; \
-	else \
-		TARGET_BINDIR="$(DESTDIR)$(BINDIR)"; \
-	fi; \
-	- rm -f "$$TARGET_BINDIR/vim-cmd"; \
-	echo "Uninstall complete (checked $$TARGET_BINDIR)."
+# Add an idempotent PATH guard to ~/.zprofile (only for per-user installs)
+case "${TARGET_BINDIR}" in
+  "${USER_HOME}"/*)
+    ZP="${USER_HOME}/.zprofile"
+    MARK="# Added by vim-cmd installer (PATH guard for ${TARGET_BINDIR})"
+    [ -f "${ZP}" ] || : > "${ZP}"
+    if ! grep -qF "${MARK}" "${ZP}"; then
+      {
+        echo
+        echo "${MARK}"
+        echo 'case ":$PATH:" in'
+        echo "  *\":${TARGET_BINDIR}:\"*) ;;"
+        echo "  *) PATH=\"${TARGET_BINDIR}:\$PATH\" ;;"
+        echo 'esac'
+        echo 'export PATH'
+      } >> "${ZP}"
+      echo "Updated ${ZP} (PATH guard for ${TARGET_BINDIR})"
+    else
+      echo "PATH guard already present in ${ZP}"
+    fi
+    ;;
+esac
 
-# Windows cross-compile helper (MinGW)
-win:
-	x86_64-w64-mingw32-gcc -O2 -o vim-cmd.exe src/vim-cmd.c -lws2_32
+echo "Installed to: ${TARGET_BINDIR}/vim-cmd"
