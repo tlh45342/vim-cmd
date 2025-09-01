@@ -30,3 +30,9 @@ make ; make install
 If on a Mac it will install the "vim-cmnd" command in the local users/bin directory.  i.e.  If the users name was user (for example) it 
 would go in /User/user/bin.  it will modify the local users $PATH. It will check to see if this path already exists and NOT add it a second time.
 Because the $PATH variable is assigned at launch of the shell... for now close the shelll and relaunch so that it picks up the 
+
+## CONFIGURING:
+
+vim-cmd> /set mode=tcp host=192.168.105.103 port=9000
+[cfg] wrote /root/.config/vim-cmd/config
+
