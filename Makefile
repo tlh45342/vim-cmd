@@ -1,4 +1,4 @@
-# vim-cmd - Makefile (client-only)
+# vim-cmd - smart macOS per-user install
 CC      ?= gcc
 CFLAGS  ?= -Wall -Wextra -O2 -g -D_XOPEN_SOURCE=700 -D_DEFAULT_SOURCE
 LDFLAGS ?=
@@ -21,32 +21,18 @@ clean:
 	rm -f *.o src/*.o
 
 install: vim-cmd
-	# Install binary
-	install -d $(DESTDIR)$(BINDIR)
-	install -m 0755 vim-cmd $(DESTDIR)$(BINDIR)/vim-cmd
-
-	# macOS PATH guard (idempotent; updates the invoking user's ~/.zprofile)
 	@UNAME=$$(uname -s); \
 	if [ "$$UNAME" = "Darwin" ]; then \
+	  # Figure out whose home to use (handles sudo)
 	  USER_HOME="$$HOME"; \
 	  if [ -n "$$SUDO_USER" ]; then USER_HOME=$$(eval echo ~$$SUDO_USER); fi; \
-	  ZP="$$USER_HOME/.zprofile"; \
-	  MARK="# Added by vim-cmd installer (PATH guard for $(BINDIR))"; \
-	  if [ ! -f "$$ZP" ] || ! grep -qF "$$MARK" "$$ZP"; then \
-	    printf "\n%s\n" "$$MARK" >> "$$ZP"; \
-	    printf 'case ":$$PATH:" in\n  *":%s:"*) ;;\n  *) PATH="%s:$$PATH" ;;\n esac\nexport PATH\n' "$(BINDIR)" "$(BINDIR)" >> "$$ZP"; \
-	    echo "Updated $$ZP (PATH guard for $(BINDIR))"; \
+	  # Intelligent default: if user didn't override BINDIR/DESTDIR and BINDIR is /usr/local/bin,
+	  # install per-user into ~/bin instead.
+	  if [ -z "$(DESTDIR)" ] && [ "$(BINDIR)" = "/usr/local/bin" ]; then \
+	    TARGET_BINDIR="$$USER_HOME/bin"; \
 	  else \
-	    echo "PATH guard already present in $$ZP"; \
+	    TARGET_BINDIR="$(DESTDIR)$(BINDIR)"; \
 	  fi; \
-	fi
-
-	@echo "Install complete."
-
-uninstall:
-	- rm -f $(DESTDIR)$(BINDIR)/vim-cmd
-	@echo "Uninstall complete."
-
-# Windows cross-compile helper (MinGW)
-win:
-	x86_64-w64-mingw32-gcc -O2 -o vim-cmd.exe src/vim-cmd.c -lws2_32
+	  install -d "$$TARGET_BINDIR"; \
+	  install -m 0755 vim-cmd "$$TARGET_BINDIR/vim-cmd"; \
+	  # Fix ownership for per-user installs done via sudo (no-op otherwise
