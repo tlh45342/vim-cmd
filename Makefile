@@ -1,4 +1,4 @@
-# vim-cmd - Makefile (client-only; mac-smart per-user install, single file)
+# vim-cmd - Makefile (client-only; mac-smart install, opens new shell tab/window on macOS)
 CC      ?= cc
 CFLAGS  ?= -Wall -Wextra -O2 -g
 LDFLAGS ?=
@@ -34,22 +34,34 @@ install: vim-cmd
 	    CHGRP=$$(id -gn "$$SUDO_USER" 2>/dev/null || echo staff); \
 	    chown "$$SUDO_USER:$$CHGRP" "$$TARGET_BINDIR/vim-cmd" 2>/dev/null || true; \
 	  fi; \
-	  if [ -z "$(DESTDIR)" ] && [ "$${TARGET_BINDIR#$$USER_HOME/}" != "$$TARGET_BINDIR" ]; then \
-	    ZP="$$USER_HOME/.zprofile"; \
-	    MARK="# Added by vim-cmd installer (PATH guard for $$TARGET_BINDIR)"; \
-	    [ -f "$$ZP" ] || : > "$$ZP"; \
-	    if ! grep -qF "$$MARK" "$$ZP"; then \
-	      printf '\n%s\n' "$$MARK" >> "$$ZP"; \
-	      printf 'case ":$$PATH:" in\n' >> "$$ZP"; \
-	      printf '  *":%s:"*) ;;\n' "$$TARGET_BINDIR" >> "$$ZP"; \
-	      printf '  *) PATH="%s:$$PATH" ;;\n' "$$TARGET_BINDIR" >> "$$ZP"; \
-	      printf 'esac\nexport PATH\n' >> "$$ZP"; \
-	      echo "Updated $$ZP (PATH guard for $$TARGET_BINDIR)"; \
-	    else \
-	      echo "PATH guard already present in $$ZP"; \
-	    fi; \
+	  ZP="$$USER_HOME/.zprofile"; \
+	  MARK="# Added by vim-cmd installer (PATH guard for $$TARGET_BINDIR)"; \
+	  [ -f "$$ZP" ] || : > "$$ZP"; \
+	  if ! grep -qF "$$MARK" "$$ZP"; then \
+	    printf '\n%s\n' "$$MARK" >> "$$ZP"; \
+	    printf 'case ":$$PATH:" in\n' >> "$$ZP"; \
+	    printf '  *":%s:"*) ;;\n' "$$TARGET_BINDIR" >> "$$ZP"; \
+	    printf '  *) PATH="%s:$$PATH" ;;\n' "$$TARGET_BINDIR" >> "$$ZP"; \
+	    printf 'esac\nexport PATH\n' >> "$$ZP"; \
+	    echo "Updated $$ZP (PATH guard for $$TARGET_BINDIR)"; \
+	  else \
+	    echo "PATH guard already present in $$ZP"; \
 	  fi; \
 	  echo "Installed to: $$TARGET_BINDIR/vim-cmd"; \
+	  # Try to open a new login shell tab/window so PATH takes effect immediately (non-invasive fallback) \
+	  if command -v osascript >/dev/null 2>&1; then \
+	    if [ "$$TERM_PROGRAM" = "Apple_Terminal" ]; then \
+	      osascript -e 'tell application "Terminal" to do script "echo \"vim-cmd installed in $$TARGET_BINDIR\"; exec zsh -l"'; \
+	      echo "Opened a new Terminal tab with updated PATH."; \
+	    elif [ "$$TERM_PROGRAM" = "iTerm.app" ]; then \
+	      osascript -e 'tell application "iTerm" to create window with default profile'; \
+	      echo "Opened a new iTerm window. Run: exec zsh -l"; \
+	    else \
+	      echo "TIP: Run \"exec zsh -l\" or \"source $$ZP && hash -r\" to refresh PATH in this shell."; \
+	    fi; \
+	  else \
+	    echo "TIP: Run \"exec zsh -l\" or \"source $$ZP && hash -r\" to refresh PATH in this shell."; \
+	  fi; \
 	else \
 	  TARGET_BINDIR="$(DESTDIR)$(BINDIR)"; \
 	  install -d "$$TARGET_BINDIR"; \
