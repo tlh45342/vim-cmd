@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <stdbool.h>
 
@@ -96,18 +97,36 @@ static void default_cfg_path(char *out, size_t outsz) {
 }
 
 #ifndef _WIN32
+// Recursively create parent directories for `path` (like `mkdir -p` for the parent dir)
 static int ensure_parent_dir(const char *path) {
-    // create parent dirs of path (very small helper)
-    char buf[512]; snprintf(buf, sizeof buf, "%s", path);
-    char *p = strrchr(buf, PATH_SEP); if (!p) return 0;
-    *p = 0;
-    // mkdir -p style (just one level needed here)
-    #ifdef _WIN32
-      (void)buf; return 0;
-    #else
-      if (mkdir(buf, 0700) == 0 || errno == EEXIST) return 0;
-      return -1;
-    #endif
+    if (!path || !*path) return 0;
+    char buf[512];
+    size_t n = strlen(path);
+    if (n >= sizeof(buf)) { errno = ENAMETOOLONG; return -1; }
+    memcpy(buf, path, n + 1);
+
+    // Strip filename -> keep only parent directory portion
+    char *p = strrchr(buf, PATH_SEP);
+    if (!p) return 0;         // no directory component
+    *p = '\0';
+    if (!buf[0]) return 0;    // path was something like "file"
+
+    // Walk and create each component
+    char *q = buf;
+    // Skip leading '/' on absolute paths
+    if (*q == PATH_SEP) q++;
+    for (; *q; q++) {
+        if (*q == PATH_SEP) {
+            *q = '\0';
+            if (buf[0]) {
+                if (mkdir(buf, 0700) != 0 && errno != EEXIST) return -1;
+            }
+            *q = PATH_SEP;
+        }
+    }
+    // Create the final parent directory
+    if (mkdir(buf, 0700) != 0 && errno != EEXIST) return -1;
+    return 0;
 }
 #endif
 
