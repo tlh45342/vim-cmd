@@ -1,4 +1,4 @@
-# vim-cmd - Makefile (client-only; mac-smart install, opens new shell tab/window on macOS)
+# vim-cmd - Makefile (client-only; mac-smart per-user install, robust)
 CC      ?= cc
 CFLAGS  ?= -Wall -Wextra -O2 -g
 LDFLAGS ?=
@@ -30,38 +30,23 @@ install: vim-cmd
 	  fi; \
 	  mkdir -p "$$TARGET_BINDIR"; \
 	  install -m 0755 vim-cmd "$$TARGET_BINDIR/vim-cmd"; \
-	  if [ -n "$$SUDO_USER" ] && [ -z "$(DESTDIR)" ] && [ "$${TARGET_BINDIR#$$USER_HOME/}" != "$$TARGET_BINDIR" ]; then \
-	    CHGRP=$$(id -gn "$$SUDO_USER" 2>/dev/null || echo staff); \
-	    chown "$$SUDO_USER:$$CHGRP" "$$TARGET_BINDIR/vim-cmd" 2>/dev/null || true; \
-	  fi; \
 	  ZP="$$USER_HOME/.zprofile"; \
 	  MARK="# Added by vim-cmd installer (PATH guard for $$TARGET_BINDIR)"; \
 	  [ -f "$$ZP" ] || : > "$$ZP"; \
 	  if ! grep -qF "$$MARK" "$$ZP"; then \
 	    printf '\n%s\n' "$$MARK" >> "$$ZP"; \
-	    printf 'case ":$$PATH:" in\n' >> "$$ZP"; \
-	    printf '  *":%s:"*) ;;\n' "$$TARGET_BINDIR" >> "$$ZP"; \
-	    printf '  *) PATH="%s:$$PATH" ;;\n' "$$TARGET_BINDIR" >> "$$ZP"; \
-	    printf 'esac\nexport PATH\n' >> "$$ZP"; \
+	    printf '[ -d "%s" ] && echo ":$$PATH:" | grep -q ":%s:" || PATH="%s:$$PATH"\n' "$$TARGET_BINDIR" "$$TARGET_BINDIR" "$$TARGET_BINDIR" >> "$$ZP"; \
+	    printf 'export PATH\n' >> "$$ZP"; \
 	    echo "Updated $$ZP (PATH guard for $$TARGET_BINDIR)"; \
 	  else \
 	    echo "PATH guard already present in $$ZP"; \
 	  fi; \
 	  echo "Installed to: $$TARGET_BINDIR/vim-cmd"; \
-	  # Try to open a new login shell tab/window so PATH takes effect immediately (non-invasive fallback) \
-	  if command -v osascript >/dev/null 2>&1; then \
-	    if [ "$$TERM_PROGRAM" = "Apple_Terminal" ]; then \
-	      osascript -e 'tell application "Terminal" to do script "echo \"vim-cmd installed in $$TARGET_BINDIR\"; exec zsh -l"'; \
-	      echo "Opened a new Terminal tab with updated PATH."; \
-	    elif [ "$$TERM_PROGRAM" = "iTerm.app" ]; then \
-	      osascript -e 'tell application "iTerm" to create window with default profile'; \
-	      echo "Opened a new iTerm window. Run: exec zsh -l"; \
-	    else \
-	      echo "TIP: Run \"exec zsh -l\" or \"source $$ZP && hash -r\" to refresh PATH in this shell."; \
-	    fi; \
-	  else \
-	    echo "TIP: Run \"exec zsh -l\" or \"source $$ZP && hash -r\" to refresh PATH in this shell."; \
-	  fi; \
+	  echo ""; \
+	  echo "To use vim-cmd immediately in THIS shell, run one of these:"; \
+	  echo "  exec zsh -l"; \
+	  echo "  # or, if you prefer to source instead of starting a login shell:"; \
+	  echo "  . $$ZP && hash -r"; \
 	else \
 	  TARGET_BINDIR="$(DESTDIR)$(BINDIR)"; \
 	  install -d "$$TARGET_BINDIR"; \
