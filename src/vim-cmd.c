@@ -1,6 +1,7 @@
-// examples/vim-cmd.c - cross-platform client for hostd with config + REPL + set
-// Build (Unix):    cc -Wall -Wextra -O2 -g -Iinclude -o vim-cmd examples/vim-cmd.c
-// Build (MinGW):   x86_64-w64-mingw32-gcc -O2 -o vim-cmd.exe examples/vim-cmd.c -lws2_32
+// vim-cmd.c - cross-platform client for hostd with config + REPL + set
+// Standalone build:
+//   Unix:   cc -Wall -Wextra -O2 -g -o vim-cmd vim-cmd.c
+//   MinGW:  x86_64-w64-mingw32-gcc -O2 -g -o vim-cmd.exe vim-cmd.c -lws2_32
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -8,16 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <sys/stat.h>
 #include <errno.h>
 #include <stdbool.h>
-
-#ifdef _WIN32
-  #define strcasecmp  _stricmp
-  #define strncasecmp _strnicmp
-#else
-  #include <strings.h>   // for strcasecmp on macOS/Linux/BSD
-#endif
 
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
@@ -43,6 +36,30 @@
   #define SOCKERR() errno
   #define PATH_SEP '/'
 #endif
+
+#if defined(_WIN32)
+  /* MinGW / MSVC: provide POSIX-style case-insensitive compares */
+  #ifndef strcasecmp
+    #define strcasecmp  _stricmp
+  #endif
+  #ifndef strncasecmp
+    #define strncasecmp _strnicmp
+  #endif
+#else
+  /* POSIX: declare the prototypes */
+  #include <strings.h>
+#endif
+
+#ifndef VIM_CMD_VERSION
+#define VIM_CMD_VERSION "0.0.2"
+#endif
+
+static void print_version(void) {
+    printf("vim-cmd version %s\n", VIM_CMD_VERSION);
+}
+
+/* Global CLI verbosity flag (currently only used for cfg_show after /connect) */
+static int g_verbose = 0;
 
 // ----- Modes -----
 typedef enum { VC_MODE_UNSET=0, VC_MODE_UNIX=1, VC_MODE_TCP=2 } vc_mode_t;
@@ -97,35 +114,70 @@ static void default_cfg_path(char *out, size_t outsz) {
 }
 
 #ifndef _WIN32
-// Recursively create parent directories for `path` (like `mkdir -p` for the parent dir)
+/* mkdir -p style parent creation for POSIX paths */
 static int ensure_parent_dir(const char *path) {
-    if (!path || !*path) return 0;
     char buf[512];
-    size_t n = strlen(path);
-    if (n >= sizeof(buf)) { errno = ENAMETOOLONG; return -1; }
-    memcpy(buf, path, n + 1);
+    snprintf(buf, sizeof buf, "%s", path);
 
-    // Strip filename -> keep only parent directory portion
+    /* Strip filename to get parent dir */
     char *p = strrchr(buf, PATH_SEP);
-    if (!p) return 0;         // no directory component
-    *p = '\0';
-    if (!buf[0]) return 0;    // path was something like "file"
-
-    // Walk and create each component
-    char *q = buf;
-    // Skip leading '/' on absolute paths
-    if (*q == PATH_SEP) q++;
-    for (; *q; q++) {
-        if (*q == PATH_SEP) {
-            *q = '\0';
-            if (buf[0]) {
-                if (mkdir(buf, 0700) != 0 && errno != EEXIST) return -1;
-            }
-            *q = PATH_SEP;
-        }
+    if (!p) {
+        /* No separator => nothing to create */
+        return 0;
     }
-    // Create the final parent directory
-    if (mkdir(buf, 0700) != 0 && errno != EEXIST) return -1;
+    *p = '\0';
+    if (buf[0] == '\0') {
+        /* Root or empty */
+        return 0;
+    }
+
+    char tmp[512];
+    snprintf(tmp, sizeof tmp, "%s", buf);
+
+    char prefix[512];
+    prefix[0] = '\0';
+
+    char *seg = tmp;
+    int is_abs = (tmp[0] == PATH_SEP);
+
+    if (is_abs) {
+        /* Start from root */
+        snprintf(prefix, sizeof prefix, "%c", PATH_SEP);
+        seg++; /* skip leading '/' */
+    }
+
+    while (*seg) {
+        char *sep = strchr(seg, PATH_SEP);
+        if (sep) *sep = '\0';
+
+        if (*seg) {
+            if (prefix[0] == '\0' || (is_abs && strcmp(prefix, "/") == 0)) {
+                /* First segment in a relative path OR directly under root */
+                if (is_abs) {
+                    snprintf(prefix, sizeof prefix, "/%s", seg);
+                } else {
+                    snprintf(prefix, sizeof prefix, "%s", seg);
+                }
+            } else {
+                size_t len = strlen(prefix);
+                if (len + 1 + strlen(seg) + 1 > sizeof(prefix)) {
+                    errno = ENAMETOOLONG;
+                    return -1;
+                }
+                prefix[len] = PATH_SEP;
+                strcpy(prefix + len + 1, seg);
+            }
+
+            if (mkdir(prefix, 0700) != 0 && errno != EEXIST) {
+                return -1;
+            }
+        }
+
+        if (!sep) break;
+        *sep = PATH_SEP;
+        seg = sep + 1;
+    }
+
     return 0;
 }
 #endif
@@ -201,20 +253,32 @@ static int cfg_write_file(const cfg_t *c, const char *path) {
 #else
     // create %APPDATA%\vim-cmd if needed
     char dir[512]; snprintf(dir, sizeof dir, "%s", path);
-    char *p = strrchr(dir, PATH_SEP); if (p) { *p = 0; CreateDirectoryA(dir, NULL); }
+    char *p = strrchr(dir, PATH_SEP);
+    if (p) { *p = 0; CreateDirectoryA(dir, NULL); }
 #endif
+
     FILE *fp = fopen(path, "w");
-    if (!fp) { perror("open config for write"); return -1; }
-#ifdef _WIN32
-    fprintf(fp, "mode=tcp\n");
-#else
-    fprintf(fp, "mode=%s\n", c->mode==VC_MODE_TCP?"tcp":"unix");
-    if (c->mode==VC_MODE_UNIX) fprintf(fp, "socket=%s\n", c->socket_path);
-#endif
-    if (c->mode==VC_MODE_TCP) {
-        fprintf(fp, "host=%s\n", c->host[0]?c->host:"127.0.0.1");
-        fprintf(fp, "port=%d\n", c->port>0?c->port:9000);
+    if (!fp) {
+        perror("open config for write");
+        return -1;
     }
+
+#ifndef _WIN32
+    if (c->mode == VC_MODE_TCP) {
+        fprintf(fp, "mode=tcp\n");
+        fprintf(fp, "host=%s\n", c->host[0] ? c->host : "127.0.0.1");
+        fprintf(fp, "port=%d\n", c->port > 0 ? c->port : 9000);
+    } else { /* VC_MODE_UNIX */
+        fprintf(fp, "mode=unix\n");
+        fprintf(fp, "socket=%s\n",
+                c->socket_path[0] ? c->socket_path : DEFAULT_UNIX_SOCK);
+    }
+#else
+    fprintf(fp, "mode=tcp\n");
+    fprintf(fp, "host=%s\n", c->host[0] ? c->host : "127.0.0.1");
+    fprintf(fp, "port=%d\n", c->port > 0 ? c->port : 9000);
+#endif
+
     fclose(fp);
     fprintf(stderr, "[cfg] wrote %s\n", path);
     return 0;
@@ -323,17 +387,34 @@ static void usage(const char *prog) {
 #ifdef _WIN32
     fprintf(stderr,
         "Usage:\n"
+        "  %s [-c cfgfile] [-T host:port] [COMMAND [ARGS...]]\n"
         "  %s [-c cfgfile] [-T host:port] set key=value [key=value ...]\n"
-        "  %s [-c cfgfile] [-T host:port] COMMAND [ARGS...]\n"
-        "  %s [-c cfgfile] [-T host:port]\n"
+        "  %s [-V|--version]\n"
+        "\n"
+        "Options:\n"
+        "  -c cfgfile      use explicit config file\n"
+        "  -T host:port    connect via TCP\n"
+        "  -v, --verbose   verbose cfg output after /connect\n"
+        "  -V, --version   show version and exit\n"
+        "  -h, --help      show this help\n"
+        "\n"
         "Config: %%APPDATA%%\\vim-cmd\\config\n",
         prog, prog, prog);
 #else
     fprintf(stderr,
         "Usage:\n"
+        "  %s [-c cfgfile] [-S socket] [-T host:port] [COMMAND [ARGS...]]\n"
         "  %s [-c cfgfile] [-S socket] [-T host:port] set key=value [key=value ...]\n"
-        "  %s [-c cfgfile] [-S socket] [-T host:port] COMMAND [ARGS...]\n"
-        "  %s [-c cfgfile] [-S socket] [-T host:port]\n"
+        "  %s [-V|--version]\n"
+        "\n"
+        "Options:\n"
+        "  -c cfgfile      use explicit config file\n"
+        "  -S socket       use unix domain socket\n"
+        "  -T host:port    connect via TCP\n"
+        "  -v, --verbose   verbose cfg output after /connect\n"
+        "  -V, --version   show version and exit\n"
+        "  -h, --help      show this help\n"
+        "\n"
         "Config: $XDG_CONFIG_HOME/vim-cmd/config or ~/.config/vim-cmd/config\n",
         prog, prog, prog);
 #endif
@@ -341,6 +422,7 @@ static void usage(const char *prog) {
 
 static int apply_kv(cfg_t *cfg, const char *k, const char *v) {
     if (!k || !v) return -1;
+
     if (!strcasecmp(k,"mode")) {
 #ifdef _WIN32
         if (!strcasecmp(v,"tcp")) cfg->mode = VC_MODE_TCP;
@@ -348,21 +430,30 @@ static int apply_kv(cfg_t *cfg, const char *k, const char *v) {
         if (!strcasecmp(v,"tcp")) cfg->mode = VC_MODE_TCP;
         else if (!strcasecmp(v,"unix")) cfg->mode = VC_MODE_UNIX;
 #endif
-        else return -1;
+        else {
+            fprintf(stderr, "invalid mode '%s' (use tcp"
+#ifndef _WIN32
+                    " or unix"
+#endif
+                    ")\n", v);
+            return -1;
+        }
     } else if (!strcasecmp(k,"host")) {
         if (snprintf(cfg->host, sizeof(cfg->host), "%s", v) >= (int)sizeof(cfg->host)) {
             fprintf(stderr, "host truncated to %zu bytes\n", sizeof(cfg->host)-1);
         }
     } else if (!strcasecmp(k,"port")) {
-        cfg->port = atoi(v);
-    } else if (!strcasecmp(k,"socket")) {
-#ifndef _WIN32
-        if (snprintf(cfg->socket_path, sizeof(cfg->socket_path), "%s", v) >= (int)sizeof(cfg->socket_path)) {
-            fprintf(stderr, "socket path too long (limit %zu)\n", sizeof(cfg->socket_path)-1);
+        char *end = NULL;
+        long p = strtol(v, &end, 10);
+        if (!*v || *end || p <= 0 || p > 65535) {
+            fprintf(stderr, "invalid port '%s'\n", v);
+            return -1;
         }
-#else
-        fprintf(stderr, "socket not supported on Windows; ignoring\n");
-#endif
+        cfg->port = (int)p;
+    } else if (!strcasecmp(k,"socket")) {
+        /* Don't allow socket= via /set; require editing config or using -S */
+        fprintf(stderr, "socket is not configurable via /set; use -S or edit the config file manually.\n");
+        return -1;
     } else {
         return -1;
     }
@@ -383,27 +474,58 @@ int main(int argc, char **argv) {
     const char *cli_sock = NULL;
 #endif
 
-#ifdef _WIN32
+    /* --------- Argument parsing --------- */
     int argi = 1;
     while (argi < argc) {
-        if (!strcmp(argv[argi], "-c") && argi+1<argc) { cli_cfg = argv[argi+1]; argi+=2; continue; }
-        if (!strcmp(argv[argi], "-T") && argi+1<argc) { cli_tcp = argv[argi+1]; argi+=2; continue; }
-        if (!strcmp(argv[argi], "-h")) { usage(argv[0]); WSACleanup(); return 0; }
-        break;
-    }
-#else
-    int opt;
-    while ((opt = getopt(argc, argv, "c:S:T:h")) != -1) {
-        switch (opt) {
-            case 'c': cli_cfg = optarg; break;
-            case 'S': cli_sock = optarg; break;
-            case 'T': cli_tcp  = optarg; break;
-            case 'h': default: usage(argv[0]); return opt=='h'?0:1;
+        const char *arg = argv[argi];
+
+        if (!strcmp(arg, "-V") || !strcmp(arg, "--version")) {
+            print_version();
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return 0;
         }
-    }
-    int argi = optind;
+
+        if (!strcmp(arg, "-v") || !strcmp(arg, "--verbose")) {
+            g_verbose = 1;
+            argi++;
+            continue;
+        }
+
+        if (!strcmp(arg, "-c") && argi+1 < argc) {
+            cli_cfg = argv[argi+1];
+            argi += 2;
+            continue;
+        }
+
+#ifndef _WIN32
+        if (!strcmp(arg, "-S") && argi+1 < argc) {
+            cli_sock = argv[argi+1];
+            argi += 2;
+            continue;
+        }
 #endif
 
+        if (!strcmp(arg, "-T") && argi+1 < argc) {
+            cli_tcp = argv[argi+1];
+            argi += 2;
+            continue;
+        }
+
+        if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
+            usage(argv[0]);
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return 0;
+        }
+
+        /* first non-option: stop parsing */
+        break;
+    }
+
+    /* --------- Config load / overrides --------- */
     if (cli_cfg) {
         snprintf(cfg.cfg_path, sizeof(cfg.cfg_path), "%s", cli_cfg);
         cfg_load_file(&cfg, cfg.cfg_path);
@@ -438,7 +560,16 @@ int main(int argc, char **argv) {
         cfg.mode = VC_MODE_TCP;
     }
 
-    // ---- One-shot "set" subcommand: write config and exit
+    /* ---- Built-in "version" command: local only, no hostd ---- */
+    if (argi < argc && !strcasecmp(argv[argi], "version")) {
+        print_version();
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return 0;
+    }
+
+    /* ---- One-shot "set" subcommand: write config and exit ---- */
     if (argi < argc && !strcasecmp(argv[argi], "set")) {
         if (!cfg.cfg_path[0]) { default_cfg_path(cfg.cfg_path, sizeof cfg.cfg_path); }
         for (int i=argi+1; i<argc; i++) {
@@ -447,7 +578,7 @@ int main(int argc, char **argv) {
             *eq = 0;
             const char *k = argv[i];
             const char *v = eq+1;
-            if (apply_kv(&cfg, k, v) != 0) fprintf(stderr, "unknown key '%s'\n", k);
+            if (apply_kv(&cfg, k, v) != 0) fprintf(stderr, "unknown or invalid key '%s'\n", k);
         }
         cfg_write_file(&cfg, cfg.cfg_path);
 #ifdef _WIN32
@@ -456,7 +587,7 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    // ---- One-shot command if remaining args exist (not "set")
+    /* ---- One-shot command if remaining args exist (not "set"/"version") ---- */
     if (argi < argc) {
         size_t total=0; for (int i=argi;i<argc;i++) total += strlen(argv[i])+1;
         char *line = (char*)malloc(total+2); if (!line) { perror("malloc");
@@ -482,12 +613,8 @@ int main(int argc, char **argv) {
         return (rc==0)?0:3;
     }
 
-    // ---- Interactive REPL
-    fprintf(stderr, "vim-cmd shell. Type /help. Using config: %s\n", cfg.cfg_path);
-reconnect:
-    cfg_show(&cfg);
-    int fd = connect_from_cfg(&cfg);
-    if (fd < 0) fprintf(stderr, "unable to connect; you can /connect or Ctrl-C\n");
+    /* ---- Interactive REPL ---- */
+    int fd = -1;  /* no automatic connection */
 
 #if defined(_WIN32)
     char ibuf[4096];
@@ -509,27 +636,47 @@ reconnect:
         if (!strcasecmp(cmd,"quit") || !strcasecmp(cmd,"exit") ||
             !strcasecmp(cmd,"/quit") || !strcasecmp(cmd,"/exit")) break;
 
+        if (!strcasecmp(cmd,"version") || !strcasecmp(cmd,"/version")) {
+            print_version();
+            continue;
+        }
+
         if (!strcasecmp(cmd,"/help")) {
 #ifdef _WIN32
             fprintf(stderr,
                 "Built-ins:\n"
-                "  /help\n"
-                "  /show\n"
-                "  /set key=value [key=value ...]   (writes config)\n"
+                "  version | /version               show vim-cmd version\n"
+                "  /help                            show this help\n"
+                "  /show                            show current config\n"
+                "  /set key=value [...]             write config\n"
+                "      keys: mode=tcp, host=<host>, port=<port>\n"
                 "  /connect tcp <host> <port>\n"
-                "  /quit | /exit\n");
+                "  /quit | /exit\n"
+                "\n"
+                "Examples:\n"
+                "  /set mode=tcp host=127.0.0.1 port=9000\n"
+                "  /connect tcp 127.0.0.1 9000\n");
 #else
             fprintf(stderr,
                 "Built-ins:\n"
-                "  /help\n"
-                "  /show\n"
-                "  /set key=value [key=value ...]   (writes config)\n"
+                "  version | /version               show vim-cmd version\n"
+                "  /help                            show this help\n"
+                "  /show                            show current config\n"
+                "  /set key=value [...]             write config\n"
+                "      keys: mode=tcp|unix, host=<host>, port=<port>\n"
                 "  /connect tcp <host> <port>\n"
                 "  /connect unix <socket>\n"
-                "  /quit | /exit\n");
+                "  /quit | /exit\n"
+                "\n"
+                "Examples:\n"
+                "  /set mode=tcp host=127.0.0.1 port=9000\n"
+                "  /set mode=unix\n"
+                "  /connect tcp 127.0.0.1 9000\n"
+                "  /connect unix /tmp/hostd.sock\n");
 #endif
             continue;
         }
+
         if (!strcasecmp(cmd,"/show")) { cfg_show(&cfg); continue; }
 
         if (!strncasecmp(cmd,"/set",4)) {
@@ -548,7 +695,7 @@ reconnect:
                     const char *k = kv;
                     const char *v = eq+1;
                     if (apply_kv(&cfg, k, v) == 0) changed = 1;
-                    else fprintf(stderr, "unknown key '%s'\n", k);
+                    else fprintf(stderr, "unknown or invalid key '%s'\n", k);
                 } else {
                     fprintf(stderr, "expected key=value near '%s'\n", kv);
                 }
@@ -585,8 +732,14 @@ reconnect:
 #endif
                     continue;
                 }
+
                 if (fd >= 0) { CLOSESOCK(fd); fd = -1; }
-                goto reconnect;
+                fd = connect_from_cfg(&cfg);
+                if (fd < 0) {
+                    fprintf(stderr, "unable to connect; check config or /set\n");
+                } else if (g_verbose) {
+                    cfg_show(&cfg);
+                }
             } else {
 #ifdef _WIN32
                 fprintf(stderr, "usage: /connect tcp <host> <port>\n");
@@ -597,9 +750,17 @@ reconnect:
             continue;
         }
 
-        if (fd < 0) { fprintf(stderr, "not connected; try /connect or /set\n"); continue; }
+        if (fd < 0) {
+            fprintf(stderr, "not connected; try /connect or /set\n");
+            continue;
+        }
+
         int rc = send_command_fd(fd, cmd);
-        if (rc == -2) { CLOSESOCK(fd); fd=-1; fprintf(stderr, "[info] reconnecting...\n"); fd = connect_from_cfg(&cfg); }
+        if (rc == -2) {
+            CLOSESOCK(fd);
+            fd = -1;
+            fprintf(stderr, "[info] server closed connection; you may /connect again\n");
+        }
     }
 
     if (fd >= 0) CLOSESOCK(fd);
