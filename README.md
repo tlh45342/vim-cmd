@@ -10,6 +10,14 @@ The name is an intentional nod, but the implementation is entirely independent.
 > Both `hostd` and `vim-cmd` are under active development.  
 > Expect frequent changes until the command set, protocol, and configuration format stabilize.
 
+
+
+> **BUILD ENVIRONMENT**  
+> The build environment is straight GNU.  
+> Note For Windows: MinGW-W64 x86_64-msvcrt-posix-seh
+
+
+
 ---
 
 ## Installation
@@ -48,7 +56,7 @@ Because `$PATH` is evaluated at shell startup, you may need to:
 
 ## Overview
 
-`vim-cmd` is a minimalist front-end for interacting with **hostd**, the backend ARM/VM management daemon.
+`vim-cmd` is a minimalist front-end for interacting with **hostd**, the backend VM management daemon.
 
 Current goals include:
 

@@ -1,8 +1,19 @@
 # vim-cmd - Makefile (client-only; mac-smart per-user install, robust)
-CC      ?= cc
+CC      = gcc
 CFLAGS  ?= -Wall -Wextra -O2 -g
-LDFLAGS ?=
 INC     ?=
+
+ifeq ($(OS),Windows_NT)
+    # Link against Winsock2 on Windows
+    LDFLAGS = -lws2_32
+    EXE    = .exe
+    RM     = del /F /Q
+else
+    LDFLAGS =
+    EXE    =
+    RM     = rm -f
+endif
+
 
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
